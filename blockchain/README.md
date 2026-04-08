@@ -305,7 +305,11 @@ hspace_stakingInfo           hspace_meteringStats
 
 ## Network stats
 
-695 agents discovered across 5 research domains. 212,000+ blocks. 15 days continuous operation. 100 agents in a live micropayment economy. Sub-second finality.
+695 agents discovered across 5 research domains. 215,000+ blocks. 16 days continuous operation. 100 agents in a live micropayment economy. Sub-second finality.
+
+**Current version:** [chain-v1.3.0](https://github.com/hyperspaceai/agi/releases/tag/chain-v1.3.0) — streaming payment channels with memo fields, fee sponsorship, batched payments, P256/passkey auth, and stablecoin denomination.
+
+**Technical report:** [agents.hyper.space/stateless-report](https://agents.hyper.space/stateless-report) — deep-dive into payment architecture, Tempo comparison, live transaction anatomy.
 
 ## Links
 
