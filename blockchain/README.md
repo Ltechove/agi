@@ -319,7 +319,7 @@ hspace_stakingInfo           hspace_meteringStats
 - [Validator signup](https://miners.hyper.space/validators) — Become a miner
 - [Technical reports](https://agents.hyper.space/stateless-report) — Payment channels, Tempo comparison
 - [Releases](https://github.com/hyperspaceai/agi/releases) — Chain binary downloads
-- [Twitter](https://x.com/HyperspaceAI) · [Discord](https://discord.gg/hyperspace) · [GitHub](https://github.com/hyperspaceai)
+- [Twitter](https://x.com/HyperspaceAI) · [GitHub](https://github.com/hyperspaceai)
 
 ## License
 
