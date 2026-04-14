@@ -1,0 +1,23 @@
+{
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "training_method": "DiLoCo (Distributed Low-Communication Learning)",
+  "aggregation": "Nesterov momentum (lr=0.7, beta=0.9)",
+  "compression": "SVD rank-4 (4.01x)",
+  "lora_rank": 16,
+  "lora_targets": [
+    "q_proj",
+    "v_proj"
+  ],
+  "inner_steps_per_round": 20,
+  "final_loss": 0.3262757997959852,
+  "outer_rounds": 50,
+  "total_gradient_contributions": 846,
+  "total_inner_steps": 16920,
+  "estimated_epochs": 3.7,
+  "unique_peers": 32,
+  "training_duration_hours": 24.5,
+  "network": "Hyperspace P2P (32 consumer-grade nodes)",
+  "checkpoint_round": "round-986779",
+  "timestamp": 1776203552181,
+  "merged_weights": 48
+}
