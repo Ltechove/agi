@@ -1,6 +1,6 @@
 # Hyperspace Pods
 
-Pool your machines into one AI cluster. Distributed and sharded inference across a mesh of consumer devices — laptops, desktops, VMs — with an OpenAI-compatible API.
+Pool your machines into one AI cluster. Distributed and sharded inference across a mesh of consumer devices with an OpenAI-compatible API.
 
 ---
 
@@ -10,177 +10,282 @@ Pool your machines into one AI cluster. Distributed and sharded inference across
 curl -fsSL https://agents.hyper.space/api/install | bash
 ```
 
-The installer auto-detects your GPU, downloads the best model for your hardware, and starts the daemon.
+Auto-detects your GPU, downloads the best model, and starts the daemon.
 
 ```bash
 hyperspace --version
 hyperspace status
 ```
 
-To update, run the install command again.
-
----
-
-## What are Pods
-
-A **Pod** is a private compute cluster. Members install the CLI, someone creates a pod, shares an invite link, and the machines form a mesh. Models are served across the mesh — a query routes to whichever node has the best model loaded.
-
-**The core idea**: a 32B parameter model that doesn't fit on any single laptop can run across two 16 GB machines. The CLI auto-detects available VRAM across the pod, splits transformer layers proportionally, and streams activations between nodes over libp2p.
-
-```
-  ┌─────────────────────────────────────────────────┐
-  │              Hyperspace Pod Mesh                 │
-  │                                                 │
-  │  ┌──────────┐   ┌──────────┐   ┌──────────┐   │
-  │  │ Laptop A │   │ Laptop B │   │   VM C   │   │
-  │  │ 16GB GPU │   │ 16GB GPU │   │  8GB GPU │   │
-  │  │ layers   │   │ layers   │   │ smaller  │   │
-  │  │ 0–31     │◄─►│ 32–63    │   │ models   │   │
-  │  └──────────┘   └──────────┘   └──────────┘   │
-  │       ▲               ▲              ▲         │
-  │       └───────────────┴──────────────┘         │
-  │              libp2p shard protocols             │
-  │                                                 │
-  │  ┌──────────────────────────────────────────┐  │
-  │  │   OpenAI-compatible API (pk_* key)       │  │
-  │  │   http://localhost:8080/v1               │  │
-  │  └──────────────────────────────────────────┘  │
-  └─────────────────────────────────────────────────┘
-```
-
-Every pod also gets:
-- **Shared cloud providers** — pool OpenRouter, Groq, Together, or any cloud API key as a fallback when local VRAM is full.
-- **OpenAI-compatible API** — a `pk_*` key that works with any OpenAI SDK client, Claude Code, aider, continue, cursor, or custom scripts.
-
 ---
 
 ## Quick start
 
-### 1. Create a pod
-
 ```bash
+# 1. Create a pod
 hyperspace pod create "my-lab"
-```
 
-### 2. Invite members
-
-```bash
-hyperspace pod invite
+# 2. Invite a friend
+hyperspace pod invite --role member --ttl 24h
 # → Invite code: hp_inv_abc123...
-# → Share link:  https://hyper.space/join/abc123
-```
+# → Share link:  https://hyperspace.sh/join/hp_inv_abc123
 
-Options:
-
-```bash
-hyperspace pod invite --role admin      # admin permissions
-hyperspace pod invite --ttl 2d          # expires in 2 days
-hyperspace pod invite --multi-use       # reusable invite
-```
-
-### 3. Members join
-
-```bash
+# 3. Friend joins
 hyperspace pod join hp_inv_abc123
-```
 
-### 4. Check what's available
+# 4. See what's available
+hyperspace pod status
+hyperspace pod models --shardable
 
-```bash
-hyperspace pod status                   # online nodes, total VRAM, models
-hyperspace pod models                   # all models across the mesh
-hyperspace pod resources                # per-node VRAM, CPU, loaded models
-```
+# 5. Shard a large model across the pod
+hyperspace pod shard qwen3.5:32b
 
-### 5. Shard a large model
+# 6. Query it
+hyperspace pod infer -p "Explain distributed inference"
 
-```bash
-hyperspace pod shard qwen3.5-32b
-```
-
-The CLI computes the optimal shard plan automatically. Each node downloads its layer range and begins serving.
-
-### 6. Query the pod
-
-```bash
+# 7. Or use the OpenAI-compatible API
 curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer pk_abc123..." \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3.5-32b",
-    "messages": [{"role":"user","content":"Hello from the pod"}]
-  }'
+  -d '{"model":"qwen3.5-32b","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 ---
 
-## Distributed inference — how it works
+## How sharding works
 
-### Layer sharding
+```
+  Request → Node A (layers 0–31, 16 GB)
+                │ activations via libp2p
+                ▼
+            Node B (layers 32–63, 16 GB)
+                │ logits
+                ▼
+            Token sampling → stream response back
+```
 
-When you run `hyperspace pod shard <model>`, the CLI:
+When you run `hyperspace pod shard <model>`:
 
-1. **Surveys the pod** — discovers every node's available VRAM and loaded models.
-2. **Estimates model size** — extracts parameter count from the model name (7b, 27b, 32b, 70b, 8x7b MoE, etc.) and accounts for quantization (Q4_K_M = 4.5 bits/param) + 20% KV cache overhead.
-3. **Computes the shard plan** — splits transformer layers proportional to each node's free VRAM. Two 16 GB nodes sharding a 32B model each get ~half the layers.
-4. **Pulls model weights** — each node downloads only its assigned layer range. Sources: Ollama (fastest), HuggingFace GGUF (auto-selects Q4_K_M > Q5_K_M > Q4_K_S), or direct URL.
-5. **Activates the ring** — nodes begin listening on the shard protocols.
-
-### Shard protocols
-
-Three libp2p protocols handle inter-node communication:
+1. **Survey** — discovers every node's VRAM and loaded models
+2. **Estimate** — extracts param count from model name, accounts for quantization (Q4_K_M = 4.5 bits/param) + 20% KV cache overhead
+3. **Plan** — splits transformer layers proportional to each node's free VRAM
+4. **Pull** — each node downloads only its assigned layer range (Ollama, HuggingFace GGUF, or direct URL)
+5. **Activate** — nodes form a ring on three libp2p protocols:
 
 | Protocol | Purpose |
 |---|---|
-| `/hyperspace/shard-activation/1.0.0` | Stream binary activations from one node's layers to the next |
-| `/hyperspace/shard-request/1.0.0` | Route an incoming inference request to the first shard |
-| `/hyperspace/shard-token/1.0.0` | Stream generated tokens from the tail shard back to the head for output |
+| `/hyperspace/shard-activation/1.0.0` | Stream activations between layer ranges |
+| `/hyperspace/shard-request/1.0.0` | Route inference requests to the first shard |
+| `/hyperspace/shard-token/1.0.0` | Stream generated tokens from tail back to head |
 
-Inference flow for a sharded request:
-
-```
-Request → Node A (layers 0–31)
-              │ activations
-              ▼
-          Node B (layers 32–63)
-              │ logits
-              ▼
-          Token sampling → stream response back
-```
-
-Each node uses its local inference backend (Ollama, llama-server, or native engine) for its assigned layers.
-
-### Smart routing
-
-The pod gateway evaluates routing options in priority order:
-
-1. **Pod-distributed** — sharded model running across local nodes (fastest, free)
-2. **Pod-peer** — federated pod via alliance (if local is at capacity)
-3. **Cloud-BYOK** — admin's own cloud API keys (OpenRouter, Groq, etc.)
-4. **Cloud-funded** — platform keys, charges pod treasury
-
-If the requested model isn't sharded but a single node has it loaded, the request routes directly to that node with no sharding overhead.
-
-### Model recommendations
+### Model recommendations by combined VRAM
 
 | Combined VRAM | Recommended shard |
 |---|---|
-| 16 GB (2 × 8 GB) | Gemma 3 12B, Qwen 2.5 14B |
-| 32 GB (2 × 16 GB) | Qwen 3.5 32B, DeepSeek Coder V2 Lite |
-| 48 GB (3 × 16 GB) | Gemma 3 27B (full precision), Codestral 22B |
-| 64 GB (4 × 16 GB) | Qwen 2.5 72B (Q4), Llama 3.1 70B (Q4) |
+| 16 GB (2 x 8 GB) | Gemma 3 12B, Qwen 2.5 14B |
+| 32 GB (2 x 16 GB) | Qwen 3.5 32B, DeepSeek Coder V2 Lite |
+| 48 GB (3 x 16 GB) | Gemma 3 27B (full precision) |
+| 64 GB (4 x 16 GB) | Qwen 2.5 72B (Q4), Llama 3.1 70B (Q4) |
 | 96 GB+ | Qwen 2.5 72B (Q8), DeepSeek V3 (Q4) |
+
+### Smart routing
+
+The gateway routes in priority order:
+
+1. **Pod-distributed** — sharded model running across local nodes (fastest, free)
+2. **Pod-peer** — federated pod via alliance
+3. **Cloud-BYOK** — admin's own cloud API keys
+4. **Cloud-funded** — platform keys, charges pod treasury
 
 ---
 
-## API keys
+## Complete command reference
 
-Every pod gets OpenAI-compatible API keys.
+### Pod lifecycle
 
 ```bash
-hyperspace pod keys create --name "dev-key" --scopes inference,embed
-# → pk_abc123def456...
+hyperspace pod create <name>
+  --plan starter|team|business|enterprise    # default: starter
+  --description "..."
+  --cloud                                    # cloud-backed (requires login)
+  --raft-port 7800                           # local Raft transport port
+  --http-port 7801                           # local pod-raft HTTP port
+
+hyperspace pod join <invite-code-or-url>
+  # Accepts: hp_inv_abc123, https://hyperspace.sh/join/CODE, hsi_v1.xxx.yyy
+
+hyperspace pod leave
+  --force                                    # skip confirmation
+
+hyperspace pod status                        # online nodes, VRAM, models, treasury
+hyperspace pod members                       # table: user, role, status, GPU, VRAM, models
 ```
+
+### Invites
+
+```bash
+hyperspace pod invite
+  --role member|viewer                       # default: member
+  --max-uses 5                               # default: 1
+  --expires 72                               # hours, default: 72
+  --ttl 24h                                  # alternative duration format (1h, 30m, 2d)
+  --multi-use                                # unlimited uses
+  --leader-hint <addr>                       # Raft leader dial hint
+```
+
+Example output (`--json`):
+```json
+{
+  "inviteCode": "POD-ABC123",
+  "magicLink": "https://hyperspace.sh/join/POD-ABC123",
+  "role": "member",
+  "expiresInHours": 72,
+  "joinCommand": "hyperspace pod join POD-ABC123"
+}
+```
+
+### Models & inference
+
+```bash
+hyperspace pod models                        # all models across the mesh
+  --shardable                                # only models that need multiple nodes
+
+hyperspace pod resources                     # per-node: GPU, VRAM, RAM, loaded models, engine
+
+hyperspace pod shard <model>                 # distribute model across nodes
+  --dry-run                                  # show plan without executing
+  --nodes 3                                  # max nodes to use (default: auto)
+  --no-pull                                  # skip auto-downloading model
+  # Model sources:
+  #   ollama name:   qwen3.5:32b, llama3.1:70b
+  #   HuggingFace:   hf:Qwen/Qwen2.5-32B-GGUF
+  #   Direct URL:    https://.../*.gguf
+  #   Local file:    file:///path/to/model.gguf
+
+hyperspace pod infer
+  -p, --prompt "..."                         # prompt text
+  -m, --model qwen3.5:32b                   # model (defaults to active ring)
+  --max-tokens 2048                          # default: 2048
+  --temperature 0.7                          # default: 0.7
+  --system "You are a helpful assistant"     # system message
+  --interactive                              # multi-turn chat mode
+
+hyperspace pod dissolve                      # tear down the active shard ring
+
+hyperspace pod gateway                       # show OpenAI-compatible connection info
+  # Prints: base URL, API keys, usage examples for
+  # Cursor, Continue, Python SDK, cURL
+```
+
+### API keys
+
+```bash
+hyperspace pod keys create
+  --name "dev-key"                           # key name
+  --models "qwen3.5:32b,llama3.1:8b"       # allowed models (empty = all)
+  --rpm 60                                   # rate limit, default: 60
+  --daily-limit 500                          # daily spend limit in cents, default: 500
+
+hyperspace pod keys list                     # table: name, hint, rpm, limit, requests, tokens
+hyperspace pod keys revoke <key-id>
+```
+
+### Providers (cloud fallback)
+
+```bash
+hyperspace pod providers add <provider>
+  # Providers: openai, anthropic, openrouter, xai, google, groq, together,
+  #   fireworks, deepinfra, mistral, cohere, deepseek, qwen, nvidia,
+  #   perplexity, cerebras, hyperbolic, replicate, huggingface, ...
+  -k, --key <api-key>                       # BYOK mode (encrypted at rest)
+  --funded                                   # platform key + pod treasury
+  --provisioned                              # OpenRouter only: native sub-keys
+  --monthly-cap 100                          # max $/month through this key
+  --one-time-cap 500                         # lifetime cap in $
+  --models "gpt-4o,claude-sonnet"           # restrict to these models
+  --default-member-limit 5                   # $/month per member (provisioned)
+  --markup-bps 1000                          # markup in basis points (funded)
+  --label "team-openrouter"                  # friendly label
+
+hyperspace pod providers list                # table: provider, label, status, cap
+hyperspace pod providers remove <id>
+hyperspace pod providers enable <id>
+hyperspace pod providers disable <id>
+hyperspace pod providers supported           # list all 27+ supported providers
+```
+
+### Budgets
+
+```bash
+hyperspace pod budgets list                  # all members: mode, limit, spent
+hyperspace pod budgets me                    # my budget + spend
+
+hyperspace pod budgets set <member-user-id>
+  --mode percent|fixed_daily|fixed_monthly|unlimited
+  --monthly 50                               # $ for fixed_monthly
+  --daily 10                                 # $ for fixed_daily
+  --percent 25                               # for percent mode
+  --providers "openrouter,groq"             # restrict providers
+  --models "qwen3.5:32b"                    # restrict models
+  --priority 200                             # higher = served first
+
+hyperspace pod budgets split-equally         # equal % share to all members
+```
+
+### Usage & treasury
+
+```bash
+hyperspace pod usage
+  --mine                                     # only my usage
+  --by-member                                # group by member (admin only)
+  --by-model                                 # group by model
+  --days 30                                  # lookback, default: 7
+
+hyperspace pod treasury                      # balance, daily/monthly spend
+```
+
+### Federation
+
+```bash
+hyperspace pod federation propose <partner-pod-id>
+  --duration 48                              # hours, default: 24
+  --models "qwen3.5:32b,llama3.1:70b"      # models to share
+
+hyperspace pod federation accept <alliance-id>
+hyperspace pod federation list               # active + pending alliances
+```
+
+### Coordinator (Raft, local mode)
+
+```bash
+hyperspace pod coord status                  # leader, Raft state, member count
+hyperspace pod coord members                 # members with roles
+hyperspace pod coord balance <member_id>     # treasury balance
+hyperspace pod coord ledger --limit 50       # treasury event history
+hyperspace pod coord keys                    # list API keys (never shows hashes)
+hyperspace pod coord transfer <to> <amount>  # transfer credits
+  --ref "job-123"
+hyperspace pod coord credit <to> <amount>    # admin credit
+hyperspace pod coord mint <name>             # mint pk_* API key
+  -s, --scopes inference,embed
+hyperspace pod coord revoke <key_id>
+hyperspace pod coord invite                  # issue invite token
+  -r, --role owner|admin|member
+  -t, --ttl 24h
+  --multi-use
+hyperspace pod coord redeem <token>          # join via Raft token
+  -a, --address host:port
+  -n, --name "Alice"
+hyperspace pod coord join-cluster <node_id> <addr>  # add Raft voter
+hyperspace pod coord leave                   # leave pod
+  -m, --member <id>                          # remove a member (admin only)
+```
+
+**All commands** support `--json` for machine-readable structured output.
+
+---
+
+## API key usage examples
 
 ### Python
 
@@ -192,11 +297,22 @@ client = OpenAI(
     api_key="pk_abc123def456..."
 )
 
+# Single query
 response = client.chat.completions.create(
     model="qwen3.5-32b",
     messages=[{"role": "user", "content": "Hello from pods"}]
 )
 print(response.choices[0].message.content)
+
+# Streaming
+stream = client.chat.completions.create(
+    model="qwen3.5-32b",
+    messages=[{"role": "user", "content": "Write a poem"}],
+    stream=True
+)
+for chunk in stream:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="")
 ```
 
 ### TypeScript
@@ -225,62 +341,124 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{"model":"qwen3.5-32b","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-Features: rate limiting per key (default 60 RPM), daily/monthly spend limits, model allowlist, usage tracking, and `allow_public_overflow` to fall back to the Hyperspace network when the pod is at capacity.
+### Embeddings
 
 ```bash
-hyperspace pod keys list                # list keys with usage stats
+curl http://localhost:8080/v1/embeddings \
+  -H "Authorization: Bearer pk_abc123def456..." \
+  -H "Content-Type: application/json" \
+  -d '{"model":"all-minilm","input":"text to embed"}'
 ```
-
----
-
-## Command reference
-
-| Command | Description |
-|---|---|
-| `hyperspace pod create <name>` | Create a new pod |
-| `hyperspace pod join <invite-code>` | Join an existing pod |
-| `hyperspace pod leave` | Leave the current pod |
-| `hyperspace pod status` | Show pod status, online nodes, total VRAM |
-| `hyperspace pod members` | List members with roles + online status |
-| `hyperspace pod invite` | Generate a shareable invite token |
-| `hyperspace pod models` | List all models available across the mesh |
-| `hyperspace pod resources` | Per-node breakdown: VRAM, CPU, loaded models |
-| `hyperspace pod shard <model>` | Activate distributed inference for a model |
-| `hyperspace pod keys create` | Mint a new `pk_*` API key |
-| `hyperspace pod keys list` | List all API keys with usage |
-| `hyperspace pod providers` | List configured cloud provider fallbacks |
-| `hyperspace pod usage` | Current usage + cost breakdown |
-
-All commands support `--json` for structured output (used by MCP / Claude Code).
 
 ---
 
 ## Using with Claude Code
 
-The Hyperspace CLI exposes itself as an MCP server. Claude Code can manage your pod and route inference through it.
+The Hyperspace CLI is a full MCP server with **82 tools**. Claude Code can manage your node, create pods, shard models, run inference, manage providers, and more — all from natural language.
 
-### Setup
+### One-command setup
 
-Add Hyperspace as an MCP server in your project's `.mcp.json`:
+```bash
+# Auto-register in Claude Code:
+hyperspace mcp install
+
+# Or the all-in-one setup:
+hyperspace setup claude-code
+
+# Or manually:
+claude mcp add hyperspace -- hyperspace mcp serve
+```
+
+### Manual `.mcp.json` config
 
 ```json
 {
   "mcpServers": {
     "hyperspace": {
       "command": "hyperspace",
-      "args": ["mcp"]
+      "args": ["mcp", "serve"]
     }
   }
 }
 ```
 
-### Example prompts in Claude Code
+### What Claude Code can do with Hyperspace
 
+**Node management** (6 tools):
 ```
-"Create a pod called research-lab and invite my teammate"
-"What models are available in my pod?"
-"Shard qwen3.5-32b across the pod"
-"Mint an API key for the frontend app"
+"Start my node in power mode"              → node_start
+"What's my node status?"                   → node_status
+"Run diagnostics"                          → node_doctor
+"Show system info"                         → node_system_info
+"Show me the last 50 log lines"            → node_logs
+```
+
+**Models** (3 tools):
+```
+"What models do I have?"                   → models_list
+"Pull qwen3.5:32b"                        → models_pull
+"Remove the old llama model"               → models_remove
+```
+
+**Inference** (2 tools):
+```
+"Ask my local model about quantum physics" → infer
+"Generate embeddings for this text"        → embed
+```
+
+**Pod management** (27 tools):
+```
+"Create a pod called research-lab"         → pod_create
+"Invite my teammate as admin"              → pod_invite
+"Join pod with code ABC123"                → pod_join
+"Who's online in my pod?"                  → pod_list_members
+"What models can the pod run?"             → pod_list_models
+"Show per-node resources"                  → pod_resources
+"Shard qwen3.5:32b across the pod"        → pod_shard_model
+"Run a prompt through the shard ring"      → pod_infer
+"Stop the distributed ring"                → pod_dissolve_ring
+"Mint an API key for the frontend"         → pod_create_api_key
+"Show gateway connection info"             → pod_gateway_info
+"Check the treasury"                       → pod_treasury
+```
+
+**Provider management** (4 tools):
+```
+"Add my OpenRouter key to the pod"         → pod_add_provider
+"List configured providers"                → pod_list_providers
+"Remove the Groq credential"               → pod_remove_provider
+"What providers are supported?"            → pod_supported_providers
+```
+
+**Budgets** (5 tools):
+```
+"Set Alice's budget to $50/month"          → pod_set_member_budget
+"Split the budget equally"                 → pod_split_budget_equally
+"Show everyone's budgets"                  → pod_list_budgets
+"What's my spend this month?"              → pod_my_budget
+"Show usage by model for the last 30 days" → pod_usage
+```
+
+**Sandboxes** (4 tools):
+```
+"Create a Python sandbox"                  → sandbox_create
+"Run this code in the sandbox"             → sandbox_execute
+"List running sandboxes"                   → sandbox_list
+"Destroy the sandbox"                      → sandbox_destroy
+```
+
+**Network & identity** (5 tools):
+```
+"Check my points balance"                  → hive_points
+"What's my peer ID?"                       → identity_info
+"Show wallet info"                         → wallet_info
+"Set my tier to 8"                         → hive_set_tier
+"Search the network for ML papers"         → search_query
+```
+
+**Escape hatch** (1 tool):
+```
+"Run: hyperspace train --solo"             → exec
 ```
 
 ### Use the pod as Claude Code's inference backend
@@ -289,20 +467,16 @@ Add Hyperspace as an MCP server in your project's `.mcp.json`:
 export OPENAI_BASE_URL="http://localhost:8080/v1"
 export OPENAI_API_KEY="pk_your_pod_key"
 
-# Any tool that uses the OpenAI SDK now talks to your pod:
+# Now any tool using the OpenAI SDK talks to your pod:
 # aider, continue, cursor, or custom scripts.
 ```
 
-### Device linking
-
-Link your CLI to your Hyperspace account so the web UI can send commands to your machine:
+### Discovery
 
 ```bash
-hyperspace login
-# The CLI heartbeats to your account and polls for remote commands.
+hyperspace mcp list-tools    # print all 82 MCP tools
+hyperspace mcp config        # print Claude Code config snippet
 ```
-
-Remote commands: install model, unload model, restart, shard model, pull URL. All queued with 1-hour TTL.
 
 ---
 
